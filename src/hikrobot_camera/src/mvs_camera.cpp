@@ -12,10 +12,7 @@ void ensureSdkInitialized()
 {
   static std::once_flag flag;
   std::call_once(flag, []() {
-    int ret = MV_CC_Initialize();
-    if (ret != MV_OK) {
-      // 初始化失败通常在 open 时由具体 API 报错体现
-    }
+    MV_CC_Initialize();
   });
 }
 }  // namespace
@@ -125,7 +122,6 @@ bool MvsCamera::getFrame(FrameInfo & frame, unsigned int timeout_ms)
   frame.frame_num = stImageInfo.stFrameInfo.nFrameNum;
   frame.pixel_type = stImageInfo.stFrameInfo.enPixelType;
 
-  // 设备时间戳（DevTimeStamp 可能是高精度时间戳，单位依赖于设备）
   frame.timestamp_ns = stImageInfo.stFrameInfo.nDevTimeStampHigh;
   frame.timestamp_ns = (frame.timestamp_ns << 32) | stImageInfo.stFrameInfo.nDevTimeStampLow;
 
@@ -146,6 +142,40 @@ void MvsCamera::releaseFrame(FrameInfo & frame)
   frame.data = nullptr;
 }
 
+bool MvsCamera::convertToBgr(
+  const FrameInfo & src,
+  std::vector<uint8_t> & dst,
+  uint32_t & dst_width,
+  uint32_t & dst_height)
+{
+  if (handle_ == nullptr || src.data == nullptr) {
+    return false;
+  }
+
+  dst_width = src.width;
+  dst_height = src.height;
+
+  size_t needed = static_cast<size_t>(src.width) * src.height * 3;
+  if (dst.size() < needed) {
+    dst.resize(needed);
+  }
+
+  MV_CC_PIXEL_CONVERT_PARAM stConvertParam;
+  std::memset(&stConvertParam, 0, sizeof(MV_CC_PIXEL_CONVERT_PARAM));
+
+  stConvertParam.nWidth         = src.width;
+  stConvertParam.nHeight        = src.height;
+  stConvertParam.pSrcData       = src.data;
+  stConvertParam.nSrcDataLen    = src.data_len;
+  stConvertParam.enSrcPixelType = src.pixel_type;
+  stConvertParam.enDstPixelType = PixelType_Gvsp_BGR8_Packed;
+  stConvertParam.pDstBuffer     = dst.data();
+  stConvertParam.nDstBufferSize = static_cast<unsigned int>(needed);
+
+  int nRet = MV_CC_ConvertPixelType(handle_, &stConvertParam);
+  return nRet == MV_OK;
+}
+
 void MvsCamera::close()
 {
   if (handle_ == nullptr) {
@@ -162,18 +192,114 @@ void MvsCamera::close()
   handle_ = nullptr;
 }
 
-// 参数相关方法暂时占位
-bool MvsCamera::openBySerial(const std::string &) { return false; }
-bool MvsCamera::openByIp(const std::string &) { return false; }
+// ---------------- 参数设置 ----------------
 
-bool MvsCamera::setExposureTime(double) { return false; }
-bool MvsCamera::setGain(double) { return false; }
-bool MvsCamera::setFrameRate(double) { return false; }
-bool MvsCamera::setPixelFormat(const std::string &) { return false; }
-bool MvsCamera::setTriggerMode(bool) { return false; }
+bool MvsCamera::setExposureTime(double us)
+{
+  if (handle_ == nullptr) {
+    return false;
+  }
 
-bool MvsCamera::getExposureTime(double &) { return false; }
-bool MvsCamera::getGain(double &) { return false; }
-bool MvsCamera::getFrameRate(double &) { return false; }
+  // 必须关闭自动曝光，否则设置 ExposureTime 会失败
+  int nRet = MV_CC_SetEnumValue(handle_, "ExposureAuto", 0);
+  if (nRet != MV_OK) {
+    return false;
+  }
+
+  nRet = MV_CC_SetFloatValue(handle_, "ExposureTime", static_cast<float>(us));
+  return nRet == MV_OK;
+}
+
+bool MvsCamera::setGain(double db)
+{
+  if (handle_ == nullptr) {
+    return false;
+  }
+
+  int nRet = MV_CC_SetEnumValue(handle_, "GainAuto", 0);
+  if (nRet != MV_OK) {
+    return false;
+  }
+
+  nRet = MV_CC_SetFloatValue(handle_, "Gain", static_cast<float>(db));
+  return nRet == MV_OK;
+}
+
+bool MvsCamera::setFrameRate(double fps)
+{
+  if (handle_ == nullptr) {
+    return false;
+  }
+
+  // 使能帧率控制
+  int nRet = MV_CC_SetBoolValue(handle_, "AcquisitionFrameRateEnable", true);
+  if (nRet != MV_OK) {
+    return false;
+  }
+
+  nRet = MV_CC_SetFloatValue(handle_, "AcquisitionFrameRate", static_cast<float>(fps));
+  return nRet == MV_OK;
+}
+
+bool MvsCamera::setTriggerMode(bool enable)
+{
+  if (handle_ == nullptr) {
+    return false;
+  }
+
+  int nRet = MV_CC_SetEnumValue(handle_, "TriggerMode", enable ? 1 : 0);
+  return nRet == MV_OK;
+}
+
+bool MvsCamera::getExposureTime(double & us)
+{
+  if (handle_ == nullptr) {
+    return false;
+  }
+
+  MVCC_FLOATVALUE stFloatValue;
+  std::memset(&stFloatValue, 0, sizeof(MVCC_FLOATVALUE));
+
+  int nRet = MV_CC_GetFloatValue(handle_, "ExposureTime", &stFloatValue);
+  if (nRet != MV_OK) {
+    return false;
+  }
+  us = stFloatValue.fCurValue;
+  return true;
+}
+
+bool MvsCamera::getGain(double & db)
+{
+  if (handle_ == nullptr) {
+    return false;
+  }
+
+  MVCC_FLOATVALUE stFloatValue;
+  std::memset(&stFloatValue, 0, sizeof(MVCC_FLOATVALUE));
+
+  int nRet = MV_CC_GetFloatValue(handle_, "Gain", &stFloatValue);
+  if (nRet != MV_OK) {
+    return false;
+  }
+  db = stFloatValue.fCurValue;
+  return true;
+}
+
+bool MvsCamera::getFrameRate(double & fps)
+{
+  if (handle_ == nullptr) {
+    return false;
+  }
+
+  MVCC_FLOATVALUE stFloatValue;
+  std::memset(&stFloatValue, 0, sizeof(MVCC_FLOATVALUE));
+
+  int nRet = MV_CC_GetFloatValue(handle_, "AcquisitionFrameRate", &stFloatValue);
+  if (nRet != MV_OK) {
+    return false;
+  }
+  fps = stFloatValue.fCurValue;
+  return true;
+}
 
 }  // namespace hikrobot_camera
