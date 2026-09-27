@@ -134,7 +134,6 @@ bool MvsCamera::openBySerial(const std::string & serial)
     if (serial == dev_serial) {
       matched = &info;
       ++match_count;
-      // 不 break：统计所有匹配，检测冲突
     }
   }
 
@@ -241,13 +240,17 @@ bool MvsCamera::stopGrabbing()
   return nRet == MV_OK;
 }
 
-bool MvsCamera::getFrame(FrameInfo & frame, unsigned int timeout_ms)
+bool MvsCamera::grabFrame(
+  FrameData & out,
+  GrabFormat format,
+  unsigned int timeout_ms)
 {
   std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr) {
     return false;
   }
 
+  // 1. 抓一帧（SDK 内部缓冲区）
   MV_FRAME_OUT stImageInfo;
   std::memset(&stImageInfo, 0, sizeof(MV_FRAME_OUT));
 
@@ -256,70 +259,55 @@ bool MvsCamera::getFrame(FrameInfo & frame, unsigned int timeout_ms)
     return false;
   }
 
-  frame.data = stImageInfo.pBufAddr;
-  frame.width = stImageInfo.stFrameInfo.nExtendWidth;
-  frame.height = stImageInfo.stFrameInfo.nExtendHeight;
-  frame.data_len = stImageInfo.stFrameInfo.nFrameLen;
-  frame.frame_num = stImageInfo.stFrameInfo.nFrameNum;
-  frame.pixel_type = stImageInfo.stFrameInfo.enPixelType;
+  // 2. 填充元数据
+  out.width            = stImageInfo.stFrameInfo.nExtendWidth;
+  out.height           = stImageInfo.stFrameInfo.nExtendHeight;
+  out.frame_num        = stImageInfo.stFrameInfo.nFrameNum;
+  out.src_pixel_type   = stImageInfo.stFrameInfo.enPixelType;
+  out.device_timestamp = stImageInfo.stFrameInfo.nDevTimeStampHigh;
+  out.device_timestamp = (out.device_timestamp << 32) |
+                         stImageInfo.stFrameInfo.nDevTimeStampLow;
 
-  // 设备时间戳：高 32 位 + 低 32 位拼成 64 位 tick
-  // 注意：单位未验证，不是纳秒。若要转成时间需查设备的 tick 频率。
-  frame.device_timestamp = stImageInfo.stFrameInfo.nDevTimeStampHigh;
-  frame.device_timestamp = (frame.device_timestamp << 32) |
-                           stImageInfo.stFrameInfo.nDevTimeStampLow;
+  // 3. 根据目标格式转换或直接拷贝
+  bool copy_ok = false;
+  if (format == GrabFormat::Bgr) {
+    size_t needed = static_cast<size_t>(out.width) * out.height * 3;
+    if (out.data.size() < needed) {
+      out.data.resize(needed);
+    }
 
-  return true;
-}
+    MV_CC_PIXEL_CONVERT_PARAM stConvertParam;
+    std::memset(&stConvertParam, 0, sizeof(MV_CC_PIXEL_CONVERT_PARAM));
+    stConvertParam.nWidth         = out.width;
+    stConvertParam.nHeight        = out.height;
+    stConvertParam.pSrcData       = stImageInfo.pBufAddr;
+    stConvertParam.nSrcDataLen    = stImageInfo.stFrameInfo.nFrameLen;
+    stConvertParam.enSrcPixelType = stImageInfo.stFrameInfo.enPixelType;
+    stConvertParam.enDstPixelType = PixelType_Gvsp_BGR8_Packed;
+    stConvertParam.pDstBuffer     = out.data.data();
+    stConvertParam.nDstBufferSize = static_cast<unsigned int>(needed);
 
-void MvsCamera::releaseFrame(FrameInfo & frame)
-{
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (handle_ == nullptr || frame.data == nullptr) {
-    return;
+    nRet = MV_CC_ConvertPixelType(handle_, &stConvertParam);
+    if (nRet == MV_OK) {
+      out.encoding = "bgr8";
+      copy_ok = true;
+    }
+  } else {
+    // RawBayer：直接拷贝原始字节（仍在锁内）
+    out.data.assign(
+      static_cast<uint8_t *>(stImageInfo.pBufAddr),
+      static_cast<uint8_t *>(stImageInfo.pBufAddr) + stImageInfo.stFrameInfo.nFrameLen);
+    out.encoding = "bayer_rggb8";
+    copy_ok = true;
   }
 
-  MV_FRAME_OUT stImageInfo;
-  std::memset(&stImageInfo, 0, sizeof(MV_FRAME_OUT));
-  stImageInfo.pBufAddr = frame.data;
-  MV_CC_FreeImageBuffer(handle_, &stImageInfo);
+  // 4. 无论拷贝是否成功，都释放 SDK 缓冲区
+  MV_FRAME_OUT stFreeInfo;
+  std::memset(&stFreeInfo, 0, sizeof(MV_FRAME_OUT));
+  stFreeInfo.pBufAddr = stImageInfo.pBufAddr;
+  MV_CC_FreeImageBuffer(handle_, &stFreeInfo);
 
-  frame.data = nullptr;
-}
-
-bool MvsCamera::convertToBgr(
-  const FrameInfo & src,
-  std::vector<uint8_t> & dst,
-  uint32_t & dst_width,
-  uint32_t & dst_height)
-{
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (handle_ == nullptr || src.data == nullptr) {
-    return false;
-  }
-
-  dst_width = src.width;
-  dst_height = src.height;
-
-  size_t needed = static_cast<size_t>(src.width) * src.height * 3;
-  if (dst.size() < needed) {
-    dst.resize(needed);
-  }
-
-  MV_CC_PIXEL_CONVERT_PARAM stConvertParam;
-  std::memset(&stConvertParam, 0, sizeof(MV_CC_PIXEL_CONVERT_PARAM));
-
-  stConvertParam.nWidth         = src.width;
-  stConvertParam.nHeight        = src.height;
-  stConvertParam.pSrcData       = src.data;
-  stConvertParam.nSrcDataLen    = src.data_len;
-  stConvertParam.enSrcPixelType = src.pixel_type;
-  stConvertParam.enDstPixelType = PixelType_Gvsp_BGR8_Packed;
-  stConvertParam.pDstBuffer     = dst.data();
-  stConvertParam.nDstBufferSize = static_cast<unsigned int>(needed);
-
-  int nRet = MV_CC_ConvertPixelType(handle_, &stConvertParam);
-  return nRet == MV_OK;
+  return copy_ok;
 }
 
 void MvsCamera::close()

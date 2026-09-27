@@ -41,13 +41,12 @@ private:
   std::string serial_number_ = "";
   std::string ip_address_    = "";
 
-  std::vector<uint8_t> bgr_buffer_;
-
-  std::thread reconnect_thread_;                 // 重连线程对象
-  std::atomic<bool> stop_reconnect_{false};      // true = 通知线程退出
-  std::atomic<bool> reconnect_needed_{false};    // true = 需要重连
-  std::atomic<bool> reconnecting_{false};        // true = 正在重连
-  std::atomic<int> consecutive_failures_{0};     // 连续抓帧失败计数
+  // ---------- 断线重连 ----------
+  std::thread reconnect_thread_;
+  std::atomic<bool> stop_reconnect_{false};
+  std::atomic<bool> reconnect_needed_{false};
+  std::atomic<bool> reconnecting_{false};
+  std::atomic<int> consecutive_failures_{0};
 
   bool initialized_ = false;
 };

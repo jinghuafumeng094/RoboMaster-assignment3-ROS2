@@ -126,6 +126,7 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
   param_cb_handle_ = this->add_on_set_parameters_callback(
     std::bind(&CameraNode::onParameterChange, this, std::placeholders::_1));
 
+  // ---------- 启动重连线程 ----------
   reconnect_thread_ = std::thread(&CameraNode::reconnectLoop, this);
 
   initialized_ = true;
@@ -344,13 +345,15 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
 
 void CameraNode::timerCallback()
 {
-
   if (reconnecting_.load()) {
     return;
   }
 
-  FrameInfo frame;
-  if (!mvs_camera_.getFrame(frame, 100)) {
+  // 一次调用完成"抓帧 + 转换 + 拷贝"，返回独立数据
+  FrameData frame;
+  GrabFormat fmt = (pixel_format_ == "bgr8") ? GrabFormat::Bgr : GrabFormat::RawBayer;
+
+  if (!mvs_camera_.grabFrame(frame, fmt, 100)) {
     int fails = ++consecutive_failures_;
 
     if (fails >= 10 && !reconnect_needed_.load()) {
@@ -366,36 +369,18 @@ void CameraNode::timerCallback()
   auto img = std::make_unique<sensor_msgs::msg::Image>();
   // 用 ROS 2 系统时间作为采集时间戳。
   // SDK 也提供 nDevTimeStampHigh/Low（设备 tick）和 nHostTimeStamp（主机时间戳），
-  // 但单位未验证，暂不使用。后续如需更精确的采集时刻，可改为设备时间戳。
+  // 但单位未验证，暂不使用。
   img->header.stamp = this->now();
   img->header.frame_id = frame_id_;
   img->height = frame.height;
   img->width  = frame.width;
+  img->encoding = frame.encoding;
+  img->is_bigendian = 0;
+  img->step = (fmt == GrabFormat::Bgr) ? (frame.width * 3) : frame.width;
 
-  if (pixel_format_ == "bgr8") {
-    uint32_t w = 0;
-    uint32_t h = 0;
-    if (!mvs_camera_.convertToBgr(frame, bgr_buffer_, w, h)) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000, "Pixel convert failed");
-      mvs_camera_.releaseFrame(frame);
-      return;
-    }
-    img->encoding = "bgr8";
-    img->is_bigendian = 0;
-    img->step = w * 3;
-    // publish 时消息要独立数据（DDS 会序列化），所以这里必须复制
-    img->data = bgr_buffer_;
-  } else {
-    img->encoding = "bayer_rggb8";
-    img->is_bigendian = 0;
-    img->step = frame.width;
-    img->data.assign(frame.data, frame.data + frame.data_len);
-  }
+  img->data = std::move(frame.data);
 
   publisher_->publish(std::move(img));
-
-  mvs_camera_.releaseFrame(frame);
 }
 
 }  // namespace hikrobot_camera

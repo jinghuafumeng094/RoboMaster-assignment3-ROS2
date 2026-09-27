@@ -11,16 +11,22 @@
 namespace hikrobot_camera
 {
 
-struct FrameInfo
+// 目标像素格式
+enum class GrabFormat
 {
-  uint8_t * data = nullptr;
+  Bgr,      
+  RawBayer  
+};
+
+struct FrameData
+{
+  std::vector<uint8_t> data;
   uint32_t width = 0;
   uint32_t height = 0;
-  uint32_t data_len = 0;
   uint32_t frame_num = 0;
-  // 设备时间戳：来自 SDK nDevTimeStampHigh/Low，单位未验证（通常是设备 tick 计数）
   uint64_t device_timestamp = 0;
-  MvGvspPixelType pixel_type = PixelType_Gvsp_Undefined;
+  MvGvspPixelType src_pixel_type = PixelType_Gvsp_Undefined;
+  std::string encoding;
 };
 
 class MvsCamera
@@ -40,14 +46,9 @@ public:
   bool startGrabbing();
   bool stopGrabbing();
 
-  bool getFrame(FrameInfo & frame, unsigned int timeout_ms);
-  void releaseFrame(FrameInfo & frame);
-
-  bool convertToBgr(
-    const FrameInfo & src,
-    std::vector<uint8_t> & dst,
-    uint32_t & dst_width,
-    uint32_t & dst_height);
+  // 原子化抓帧：一次加锁完成 GetImageBuffer → 转换/拷贝 → FreeImageBuffer
+  // 返回后 out.data 是独立拷贝，SDK 缓冲区已释放，外部拿不到裸指针
+  bool grabFrame(FrameData & out, GrabFormat format, unsigned int timeout_ms);
 
   void close();
 
@@ -62,7 +63,6 @@ public:
 
   bool isOpen() const;
 
-  // 最近一次 open 失败的原因，供上层打印
   std::string lastError() const;
 
 private:
