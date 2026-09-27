@@ -1,5 +1,6 @@
 #include "hikrobot_camera/mvs_camera.hpp"
 
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -43,19 +44,11 @@ bool MvsCamera::listDevices(std::vector<MV_CC_DEVICE_INFO> & devices)
   return true;
 }
 
-bool MvsCamera::openByIndex(unsigned int index)
+bool MvsCamera::openByDeviceInfo(const MV_CC_DEVICE_INFO & info)
 {
   ensureSdkInitialized();
 
-  std::vector<MV_CC_DEVICE_INFO> devices;
-  if (!listDevices(devices)) {
-    return false;
-  }
-  if (index >= devices.size()) {
-    return false;
-  }
-
-  int nRet = MV_CC_CreateHandle(&handle_, &devices[index]);
+  int nRet = MV_CC_CreateHandle(&handle_, &info);
   if (nRet != MV_OK) {
     handle_ = nullptr;
     return false;
@@ -68,6 +61,93 @@ bool MvsCamera::openByIndex(unsigned int index)
     return false;
   }
   return true;
+}
+
+bool MvsCamera::openByIndex(unsigned int index)
+{
+  ensureSdkInitialized();
+
+  std::vector<MV_CC_DEVICE_INFO> devices;
+  if (!listDevices(devices)) {
+    return false;
+  }
+  if (index >= devices.size()) {
+    return false;
+  }
+  return openByDeviceInfo(devices[index]);
+}
+
+bool MvsCamera::openBySerial(const std::string & serial)
+{
+  if (serial.empty()) {
+    return false;
+  }
+
+  std::vector<MV_CC_DEVICE_INFO> devices;
+  if (!listDevices(devices)) {
+    return false;
+  }
+
+  const MV_CC_DEVICE_INFO * matched = nullptr;
+  for (const auto & info : devices) {
+    std::string dev_serial;
+    if (info.nTLayerType == MV_USB_DEVICE) {
+      dev_serial = reinterpret_cast<const char *>(info.SpecialInfo.stUsb3VInfo.chSerialNumber);
+    } else if (info.nTLayerType == MV_GIGE_DEVICE) {
+      dev_serial = reinterpret_cast<const char *>(info.SpecialInfo.stGigEInfo.chSerialNumber);
+    } else {
+      continue;
+    }
+
+    if (serial == dev_serial) {
+      matched = &info;
+      break;
+    }
+  }
+
+  if (matched == nullptr) {
+    return false;
+  }
+  return openByDeviceInfo(*matched);
+}
+
+bool MvsCamera::openByIp(const std::string & ip)
+{
+  if (ip.empty()) {
+    return false;
+  }
+
+  uint32_t target_ip = 0;
+  {
+    unsigned int a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
+      return false;
+    }
+    if (a > 255 || b > 255 || c > 255 || d > 255) {
+      return false;
+    }
+    target_ip = (a << 24) | (b << 16) | (c << 8) | d;
+  }
+
+  std::vector<MV_CC_DEVICE_INFO> devices;
+  if (!listDevices(devices)) {
+    return false;
+  }
+
+  const MV_CC_DEVICE_INFO * matched = nullptr;
+  for (const auto & info : devices) {
+    if (info.nTLayerType == MV_GIGE_DEVICE) {
+      if (info.SpecialInfo.stGigEInfo.nCurrentIp == target_ip) {
+        matched = &info;
+        break;
+      }
+    }
+  }
+
+  if (matched == nullptr) {
+    return false;
+  }
+  return openByDeviceInfo(*matched);
 }
 
 bool MvsCamera::startGrabbing()
@@ -192,15 +272,12 @@ void MvsCamera::close()
   handle_ = nullptr;
 }
 
-// ---------------- 参数设置 ----------------
-
 bool MvsCamera::setExposureTime(double us)
 {
   if (handle_ == nullptr) {
     return false;
   }
 
-  // 必须关闭自动曝光，否则设置 ExposureTime 会失败
   int nRet = MV_CC_SetEnumValue(handle_, "ExposureAuto", 0);
   if (nRet != MV_OK) {
     return false;
@@ -231,7 +308,6 @@ bool MvsCamera::setFrameRate(double fps)
     return false;
   }
 
-  // 使能帧率控制
   int nRet = MV_CC_SetBoolValue(handle_, "AcquisitionFrameRateEnable", true);
   if (nRet != MV_OK) {
     return false;

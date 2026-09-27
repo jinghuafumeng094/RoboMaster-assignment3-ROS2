@@ -32,6 +32,8 @@ private:
   std::string frame_id_     = "camera_link";
   std::string topic_name_   = "image_raw";
   std::string pixel_format_ = "bgr8";
+  std::string serial_number_ = "";
+  std::string ip_address_    = "";
 };
 
 }  // namespace hikrobot_camera

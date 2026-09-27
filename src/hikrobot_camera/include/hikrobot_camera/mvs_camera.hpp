@@ -32,6 +32,8 @@ public:
 
   bool listDevices(std::vector<MV_CC_DEVICE_INFO> & devices);
   bool openByIndex(unsigned int index);
+  bool openBySerial(const std::string & serial);
+  bool openByIp(const std::string & ip);
 
   bool startGrabbing();
   bool stopGrabbing();
@@ -60,6 +62,8 @@ public:
   bool isOpen() const { return handle_ != nullptr; }
 
 private:
+  bool openByDeviceInfo(const MV_CC_DEVICE_INFO & info);
+
   void * handle_ = nullptr;
   bool grabbing_ = false;
 };
