@@ -3,3 +3,19 @@
 /hikrobot_camera:
   ros__parameters:
     use_sim_time: false
+
+    # 相机连接
+    # 留空时按 index 0 打开；指定 serial_number 或 ip_address 时优先按它们
+    serial_number: ""
+    ip_address: ""
+
+    # 图像发布
+    topic_name: "image_raw"
+    frame_id: "camera_optical_frame"
+    # 可选值：bgr8 / bayer_rggb8
+    pixel_format: "bgr8"
+
+    # 相机参数
+    exposure_time: 5000.0
+    gain: 0.0
+    frame_rate: 30.0

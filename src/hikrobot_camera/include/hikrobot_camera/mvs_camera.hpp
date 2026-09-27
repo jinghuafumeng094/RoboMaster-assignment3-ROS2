@@ -18,7 +18,8 @@ struct FrameInfo
   uint32_t height = 0;
   uint32_t data_len = 0;
   uint32_t frame_num = 0;
-  uint64_t timestamp_ns = 0;
+  // 设备时间戳：来自 SDK nDevTimeStampHigh/Low，单位未验证（通常是设备 tick 计数）
+  uint64_t device_timestamp = 0;
   MvGvspPixelType pixel_type = PixelType_Gvsp_Undefined;
 };
 
@@ -50,7 +51,6 @@ public:
 
   void close();
 
-  // set 内部会读回验证，不一致时返回 false
   bool setExposureTime(double us);
   bool setGain(double db);
   bool setFrameRate(double fps);
@@ -62,12 +62,16 @@ public:
 
   bool isOpen() const;
 
+  // 最近一次 open 失败的原因，供上层打印
+  std::string lastError() const;
+
 private:
   bool openByDeviceInfo(const MV_CC_DEVICE_INFO & info);
 
   void * handle_ = nullptr;
   bool grabbing_ = false;
   mutable std::mutex mutex_;
+  std::string last_error_;
 };
 
 }  // namespace hikrobot_camera

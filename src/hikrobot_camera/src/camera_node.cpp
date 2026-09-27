@@ -60,21 +60,24 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
     RCLCPP_INFO(get_logger(), "Trying to open camera by IP: %s", ip_address_.c_str());
     opened = mvs_camera_.openByIp(ip_address_);
     if (!opened) {
-      RCLCPP_FATAL(get_logger(), "Failed to open camera by IP: %s", ip_address_.c_str());
+      RCLCPP_FATAL(get_logger(), "Failed to open camera by IP '%s': %s",
+        ip_address_.c_str(), mvs_camera_.lastError().c_str());
       return;
     }
   } else if (!serial_number_.empty()) {
     RCLCPP_INFO(get_logger(), "Trying to open camera by serial: %s", serial_number_.c_str());
     opened = mvs_camera_.openBySerial(serial_number_);
     if (!opened) {
-      RCLCPP_FATAL(get_logger(), "Failed to open camera by serial: %s", serial_number_.c_str());
+      RCLCPP_FATAL(get_logger(), "Failed to open camera by serial '%s': %s",
+        serial_number_.c_str(), mvs_camera_.lastError().c_str());
       return;
     }
   } else {
     RCLCPP_INFO(get_logger(), "No serial/IP specified, opening camera index 0");
     opened = mvs_camera_.openByIndex(0);
     if (!opened) {
-      RCLCPP_FATAL(get_logger(), "Failed to open camera index 0");
+      RCLCPP_FATAL(get_logger(), "Failed to open camera index 0: %s",
+        mvs_camera_.lastError().c_str());
       return;
     }
   }
@@ -123,12 +126,19 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
   param_cb_handle_ = this->add_on_set_parameters_callback(
     std::bind(&CameraNode::onParameterChange, this, std::placeholders::_1));
 
+  reconnect_thread_ = std::thread(&CameraNode::reconnectLoop, this);
+
   initialized_ = true;
   RCLCPP_INFO(get_logger(), "hikrobot_camera node initialized successfully.");
 }
 
 CameraNode::~CameraNode()
 {
+  stop_reconnect_ = true;
+  if (reconnect_thread_.joinable()) {
+    reconnect_thread_.join();
+  }
+
   if (timer_) {
     timer_->cancel();
   }
@@ -137,13 +147,84 @@ CameraNode::~CameraNode()
   RCLCPP_INFO(get_logger(), "Camera closed.");
 }
 
+void CameraNode::reconnectLoop()
+{
+  while (!stop_reconnect_.load()) {
+    if (!reconnect_needed_.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      continue;
+    }
+
+    reconnecting_ = true;
+    RCLCPP_WARN(get_logger(), "Attempting to reconnect camera...");
+
+    bool ok = tryReconnect();
+
+    if (ok) {
+      RCLCPP_INFO(get_logger(), "Camera reconnected successfully");
+      reconnect_needed_ = false;
+      consecutive_failures_ = 0;
+    } else {
+      RCLCPP_WARN(get_logger(), "Reconnect failed, will retry in 1s");
+    }
+
+    reconnecting_ = false;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+
+  RCLCPP_INFO(get_logger(), "Reconnect thread exiting");
+}
+
+bool CameraNode::tryReconnect()
+{
+  mvs_camera_.close();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+  bool ok = false;
+  if (!ip_address_.empty()) {
+    ok = mvs_camera_.openByIp(ip_address_);
+  } else if (!serial_number_.empty()) {
+    ok = mvs_camera_.openBySerial(serial_number_);
+  } else {
+    ok = mvs_camera_.openByIndex(0);
+  }
+  if (!ok) {
+    RCLCPP_WARN(get_logger(), "Reconnect: open failed: %s",
+      mvs_camera_.lastError().c_str());
+    return false;
+  }
+
+  double exp = this->get_parameter("exposure_time").as_double();
+  double g   = this->get_parameter("gain").as_double();
+  double fr  = this->get_parameter("frame_rate").as_double();
+
+  if (!mvs_camera_.setExposureTime(exp)) {
+    RCLCPP_WARN(get_logger(), "Reconnect: set exposure %.1f failed", exp);
+  }
+  if (!mvs_camera_.setGain(g)) {
+    RCLCPP_WARN(get_logger(), "Reconnect: set gain %.2f failed", g);
+  }
+  if (!mvs_camera_.setFrameRate(fr)) {
+    RCLCPP_WARN(get_logger(), "Reconnect: set frame_rate %.2f failed", fr);
+  }
+
+  if (!mvs_camera_.startGrabbing()) {
+    RCLCPP_WARN(get_logger(), "Reconnect: startGrabbing failed");
+    mvs_camera_.close();
+    return false;
+  }
+
+  return true;
+}
+
 rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
   const std::vector<rclcpp::Parameter> & params)
 {
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
 
-  // ---------- 第一遍：字符串参数（不需要回滚） ----------
+  // 第一遍：字符串参数（不需要回滚）
   for (const auto & p : params) {
     const std::string & name = p.get_name();
 
@@ -180,14 +261,20 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
     }
   }
 
-  // ---------- 第二遍：数值参数，带回滚 ----------
-  double old_exp = 0.0, old_gain = 0.0, old_fr = 0.0;
+  // 第二遍：数值参数，带回滚
+  double old_exp = 0.0;
+  double old_gain = 0.0;
+  double old_fr = 0.0;
   mvs_camera_.getExposureTime(old_exp);
   mvs_camera_.getGain(old_gain);
   mvs_camera_.getFrameRate(old_fr);
 
-  bool has_exp = false, has_gain = false, has_fr = false;
-  double new_exp = old_exp, new_gain = old_gain, new_fr = old_fr;
+  bool has_exp = false;
+  bool has_gain = false;
+  bool has_fr = false;
+  double new_exp = old_exp;
+  double new_gain = old_gain;
+  double new_fr = old_fr;
 
   for (const auto & p : params) {
     const std::string & name = p.get_name();
@@ -198,7 +285,8 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
         result.reason = "exposure_time must be > 0";
         return result;
       }
-      new_exp = v; has_exp = true;
+      new_exp = v;
+      has_exp = true;
     } else if (name == "gain") {
       double v = p.as_double();
       if (v < 0.0) {
@@ -206,7 +294,8 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
         result.reason = "gain must be >= 0";
         return result;
       }
-      new_gain = v; has_gain = true;
+      new_gain = v;
+      has_gain = true;
     } else if (name == "frame_rate") {
       double v = p.as_double();
       if (v <= 0.0) {
@@ -214,7 +303,8 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
         result.reason = "frame_rate must be > 0";
         return result;
       }
-      new_fr = v; has_fr = true;
+      new_fr = v;
+      has_fr = true;
     }
   }
 
@@ -254,14 +344,29 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
 
 void CameraNode::timerCallback()
 {
-  FrameInfo frame;
-  if (!mvs_camera_.getFrame(frame, 100)) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 2000, "Frame timeout");
+
+  if (reconnecting_.load()) {
     return;
   }
 
+  FrameInfo frame;
+  if (!mvs_camera_.getFrame(frame, 100)) {
+    int fails = ++consecutive_failures_;
+
+    if (fails >= 10 && !reconnect_needed_.load()) {
+      RCLCPP_WARN(get_logger(),
+        "Camera disconnected (%d consecutive failures), triggering reconnect", fails);
+      reconnect_needed_ = true;
+    }
+    return;
+  }
+
+  consecutive_failures_ = 0;
+
   auto img = std::make_unique<sensor_msgs::msg::Image>();
+  // 用 ROS 2 系统时间作为采集时间戳。
+  // SDK 也提供 nDevTimeStampHigh/Low（设备 tick）和 nHostTimeStamp（主机时间戳），
+  // 但单位未验证，暂不使用。后续如需更精确的采集时刻，可改为设备时间戳。
   img->header.stamp = this->now();
   img->header.frame_id = frame_id_;
   img->height = frame.height;
@@ -279,7 +384,7 @@ void CameraNode::timerCallback()
     img->encoding = "bgr8";
     img->is_bigendian = 0;
     img->step = w * 3;
-    // publish 时消息要独立数据，DDS 会拷贝，所以这里必须复制
+    // publish 时消息要独立数据（DDS 会序列化），所以这里必须复制
     img->data = bgr_buffer_;
   } else {
     img->encoding = "bayer_rggb8";

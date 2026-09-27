@@ -1,7 +1,9 @@
 #ifndef HIKROBOT_CAMERA__CAMERA_NODE_HPP_
 #define HIKROBOT_CAMERA__CAMERA_NODE_HPP_
 
+#include <atomic>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "hikrobot_camera/mvs_camera.hpp"
@@ -22,6 +24,8 @@ public:
 
 private:
   void timerCallback();
+  void reconnectLoop();
+  bool tryReconnect();
 
   rcl_interfaces::msg::SetParametersResult onParameterChange(
     const std::vector<rclcpp::Parameter> & params);
@@ -37,8 +41,13 @@ private:
   std::string serial_number_ = "";
   std::string ip_address_    = "";
 
-  // 复用缓冲区，避免每帧堆分配
   std::vector<uint8_t> bgr_buffer_;
+
+  std::thread reconnect_thread_;                 // 重连线程对象
+  std::atomic<bool> stop_reconnect_{false};      // true = 通知线程退出
+  std::atomic<bool> reconnect_needed_{false};    // true = 需要重连
+  std::atomic<bool> reconnecting_{false};        // true = 正在重连
+  std::atomic<int> consecutive_failures_{0};     // 连续抓帧失败计数
 
   bool initialized_ = false;
 };

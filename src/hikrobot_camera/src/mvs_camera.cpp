@@ -24,6 +24,12 @@ MvsCamera::~MvsCamera()
   close();
 }
 
+std::string MvsCamera::lastError() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return last_error_;
+}
+
 bool MvsCamera::isOpen() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -58,6 +64,7 @@ bool MvsCamera::openByDeviceInfo(const MV_CC_DEVICE_INFO & info)
   int nRet = MV_CC_CreateHandle(&handle_, &info);
   if (nRet != MV_OK) {
     handle_ = nullptr;
+    last_error_ = "MV_CC_CreateHandle failed: 0x" + std::to_string(nRet);
     return false;
   }
 
@@ -65,6 +72,7 @@ bool MvsCamera::openByDeviceInfo(const MV_CC_DEVICE_INFO & info)
   if (nRet != MV_OK) {
     MV_CC_DestroyHandle(handle_);
     handle_ = nullptr;
+    last_error_ = "MV_CC_OpenDevice failed: 0x" + std::to_string(nRet);
     return false;
   }
   return true;
@@ -74,36 +82,45 @@ bool MvsCamera::openByIndex(unsigned int index)
 {
   std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ != nullptr) {
+    last_error_ = "Camera already open";
     return false;
   }
 
   std::vector<MV_CC_DEVICE_INFO> devices;
   if (!listDevices(devices)) {
+    last_error_ = "MV_CC_EnumDevices failed";
     return false;
   }
   if (index >= devices.size()) {
+    last_error_ = "Index " + std::to_string(index) +
+                  " out of range, found " + std::to_string(devices.size()) + " device(s)";
     return false;
   }
+  last_error_.clear();
   return openByDeviceInfo(devices[index]);
 }
 
 bool MvsCamera::openBySerial(const std::string & serial)
 {
   if (serial.empty()) {
+    last_error_ = "Serial is empty";
     return false;
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ != nullptr) {
+    last_error_ = "Camera already open";
     return false;
   }
 
   std::vector<MV_CC_DEVICE_INFO> devices;
   if (!listDevices(devices)) {
+    last_error_ = "MV_CC_EnumDevices failed";
     return false;
   }
 
   const MV_CC_DEVICE_INFO * matched = nullptr;
+  int match_count = 0;
   for (const auto & info : devices) {
     std::string dev_serial;
     if (info.nTLayerType == MV_USB_DEVICE) {
@@ -116,19 +133,28 @@ bool MvsCamera::openBySerial(const std::string & serial)
 
     if (serial == dev_serial) {
       matched = &info;
-      break;
+      ++match_count;
+      // 不 break：统计所有匹配，检测冲突
     }
   }
 
-  if (matched == nullptr) {
+  if (match_count == 0) {
+    last_error_ = "No camera with serial '" + serial + "'";
     return false;
   }
+  if (match_count > 1) {
+    last_error_ = "Ambiguous: " + std::to_string(match_count) +
+                  " cameras have serial '" + serial + "'";
+    return false;
+  }
+  last_error_.clear();
   return openByDeviceInfo(*matched);
 }
 
 bool MvsCamera::openByIp(const std::string & ip)
 {
   if (ip.empty()) {
+    last_error_ = "IP is empty";
     return false;
   }
 
@@ -136,9 +162,11 @@ bool MvsCamera::openByIp(const std::string & ip)
   {
     unsigned int a = 0, b = 0, c = 0, d = 0;
     if (std::sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
+      last_error_ = "Invalid IP format: " + ip;
       return false;
     }
     if (a > 255 || b > 255 || c > 255 || d > 255) {
+      last_error_ = "Invalid IP range: " + ip;
       return false;
     }
     target_ip = (a << 24) | (b << 16) | (c << 8) | d;
@@ -146,27 +174,37 @@ bool MvsCamera::openByIp(const std::string & ip)
 
   std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ != nullptr) {
+    last_error_ = "Camera already open";
     return false;
   }
 
   std::vector<MV_CC_DEVICE_INFO> devices;
   if (!listDevices(devices)) {
+    last_error_ = "MV_CC_EnumDevices failed";
     return false;
   }
 
   const MV_CC_DEVICE_INFO * matched = nullptr;
+  int match_count = 0;
   for (const auto & info : devices) {
     if (info.nTLayerType == MV_GIGE_DEVICE) {
       if (info.SpecialInfo.stGigEInfo.nCurrentIp == target_ip) {
         matched = &info;
-        break;
+        ++match_count;
       }
     }
   }
 
-  if (matched == nullptr) {
+  if (match_count == 0) {
+    last_error_ = "No GigE camera with IP '" + ip + "'";
     return false;
   }
+  if (match_count > 1) {
+    last_error_ = "Ambiguous: " + std::to_string(match_count) +
+                  " cameras have IP '" + ip + "'";
+    return false;
+  }
+  last_error_.clear();
   return openByDeviceInfo(*matched);
 }
 
@@ -225,8 +263,11 @@ bool MvsCamera::getFrame(FrameInfo & frame, unsigned int timeout_ms)
   frame.frame_num = stImageInfo.stFrameInfo.nFrameNum;
   frame.pixel_type = stImageInfo.stFrameInfo.enPixelType;
 
-  frame.timestamp_ns = stImageInfo.stFrameInfo.nDevTimeStampHigh;
-  frame.timestamp_ns = (frame.timestamp_ns << 32) | stImageInfo.stFrameInfo.nDevTimeStampLow;
+  // 设备时间戳：高 32 位 + 低 32 位拼成 64 位 tick
+  // 注意：单位未验证，不是纳秒。若要转成时间需查设备的 tick 频率。
+  frame.device_timestamp = stImageInfo.stFrameInfo.nDevTimeStampHigh;
+  frame.device_timestamp = (frame.device_timestamp << 32) |
+                           stImageInfo.stFrameInfo.nDevTimeStampLow;
 
   return true;
 }
@@ -297,8 +338,6 @@ void MvsCamera::close()
   MV_CC_DestroyHandle(handle_);
   handle_ = nullptr;
 }
-
-// ---------- 参数设置：写完后读回，不一致则视为失败 ----------
 
 bool MvsCamera::setExposureTime(double us)
 {
