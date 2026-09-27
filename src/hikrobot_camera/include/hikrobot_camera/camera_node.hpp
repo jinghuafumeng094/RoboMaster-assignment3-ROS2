@@ -29,8 +29,9 @@ private:
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
 
-  std::string frame_id_   = "camera_link";
-  std::string topic_name_ = "image_raw";
+  std::string frame_id_     = "camera_link";
+  std::string topic_name_   = "image_raw";
+  std::string pixel_format_ = "bgr8";
 };
 
 }  // namespace hikrobot_camera
