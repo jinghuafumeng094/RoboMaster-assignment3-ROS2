@@ -10,31 +10,37 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
 {
   RCLCPP_INFO(get_logger(), "hikrobot_camera node starting...");
 
-  std::vector<MV_CC_DEVICE_INFO> devices;
-  if (!mvs_camera_.listDevices(devices)) {
-    RCLCPP_ERROR(get_logger(), "Failed to enumerate MVS devices");
+  if (!mvs_camera_.openByIndex(0)) {
+    RCLCPP_ERROR(get_logger(), "Failed to open camera index 0");
     return;
   }
+  RCLCPP_INFO(get_logger(), "Camera opened");
 
-  RCLCPP_INFO(get_logger(), "Found %zu device(s)", devices.size());
-
-  for (size_t i = 0; i < devices.size(); ++i) {
-    const auto & info = devices[i];
-    if (info.nTLayerType == MV_USB_DEVICE) {
-      RCLCPP_INFO(
-        get_logger(), "[%zu] USB | Model: %s | Serial: %s",
-        i,
-        info.SpecialInfo.stUsb3VInfo.chModelName,
-        info.SpecialInfo.stUsb3VInfo.chSerialNumber);
-    } else if (info.nTLayerType == MV_GIGE_DEVICE) {
-      uint32_t ip = info.SpecialInfo.stGigEInfo.nCurrentIp;
-      RCLCPP_INFO(
-        get_logger(), "[%zu] GigE | Model: %s | IP: %u.%u.%u.%u",
-        i,
-        info.SpecialInfo.stGigEInfo.chModelName,
-        (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
-    }
+  if (!mvs_camera_.startGrabbing()) {
+    RCLCPP_ERROR(get_logger(), "Failed to start grabbing");
+    return;
   }
+  RCLCPP_INFO(get_logger(), "Grabbing started");
+
+  for (int i = 0; i < 10; ++i) {
+    FrameInfo frame;
+    if (!mvs_camera_.getFrame(frame, 1000)) {
+      RCLCPP_WARN(get_logger(), "Frame %d: timeout", i);
+      continue;
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Frame %u: %ux%u, len=%u, pixel_type=0x%x",
+      frame.frame_num, frame.width, frame.height,
+      frame.data_len, static_cast<unsigned int>(frame.pixel_type));
+
+    mvs_camera_.releaseFrame(frame);
+  }
+
+  mvs_camera_.stopGrabbing();
+  mvs_camera_.close();
+  RCLCPP_INFO(get_logger(), "Camera closed. Test done.");
 }
 
 }  // namespace hikrobot_camera
