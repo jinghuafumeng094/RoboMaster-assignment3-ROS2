@@ -18,6 +18,8 @@ public:
   explicit CameraNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
   ~CameraNode() override;
 
+  bool isInitialized() const { return initialized_; }
+
 private:
   void timerCallback();
 
@@ -29,11 +31,13 @@ private:
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
 
-  std::string frame_id_     = "camera_link";
+  std::string frame_id_     = "camera_optical_frame";
   std::string topic_name_   = "image_raw";
   std::string pixel_format_ = "bgr8";
   std::string serial_number_ = "";
   std::string ip_address_    = "";
+
+  bool initialized_ = false;
 };
 
 }  // namespace hikrobot_camera
