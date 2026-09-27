@@ -37,6 +37,9 @@ private:
   std::string serial_number_ = "";
   std::string ip_address_    = "";
 
+  // 复用缓冲区，避免每帧堆分配
+  std::vector<uint8_t> bgr_buffer_;
+
   bool initialized_ = false;
 };
 

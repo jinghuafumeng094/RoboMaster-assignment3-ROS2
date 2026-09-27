@@ -2,6 +2,7 @@
 #define HIKROBOT_CAMERA__MVS_CAMERA_HPP_
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -49,7 +50,7 @@ public:
 
   void close();
 
-  // 参数设置 / 读取
+  // set 内部会读回验证，不一致时返回 false
   bool setExposureTime(double us);
   bool setGain(double db);
   bool setFrameRate(double fps);
@@ -59,13 +60,14 @@ public:
   bool getGain(double & db);
   bool getFrameRate(double & fps);
 
-  bool isOpen() const { return handle_ != nullptr; }
+  bool isOpen() const;
 
 private:
   bool openByDeviceInfo(const MV_CC_DEVICE_INFO & info);
 
   void * handle_ = nullptr;
   bool grabbing_ = false;
+  mutable std::mutex mutex_;
 };
 
 }  // namespace hikrobot_camera

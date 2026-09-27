@@ -1,5 +1,6 @@
 #include "hikrobot_camera/mvs_camera.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -21,6 +22,12 @@ void ensureSdkInitialized()
 MvsCamera::~MvsCamera()
 {
   close();
+}
+
+bool MvsCamera::isOpen() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return handle_ != nullptr;
 }
 
 bool MvsCamera::listDevices(std::vector<MV_CC_DEVICE_INFO> & devices)
@@ -65,7 +72,10 @@ bool MvsCamera::openByDeviceInfo(const MV_CC_DEVICE_INFO & info)
 
 bool MvsCamera::openByIndex(unsigned int index)
 {
-  ensureSdkInitialized();
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (handle_ != nullptr) {
+    return false;
+  }
 
   std::vector<MV_CC_DEVICE_INFO> devices;
   if (!listDevices(devices)) {
@@ -80,6 +90,11 @@ bool MvsCamera::openByIndex(unsigned int index)
 bool MvsCamera::openBySerial(const std::string & serial)
 {
   if (serial.empty()) {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (handle_ != nullptr) {
     return false;
   }
 
@@ -129,6 +144,11 @@ bool MvsCamera::openByIp(const std::string & ip)
     target_ip = (a << 24) | (b << 16) | (c << 8) | d;
   }
 
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (handle_ != nullptr) {
+    return false;
+  }
+
   std::vector<MV_CC_DEVICE_INFO> devices;
   if (!listDevices(devices)) {
     return false;
@@ -152,6 +172,7 @@ bool MvsCamera::openByIp(const std::string & ip)
 
 bool MvsCamera::startGrabbing()
 {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr) {
     return false;
   }
@@ -172,6 +193,7 @@ bool MvsCamera::startGrabbing()
 
 bool MvsCamera::stopGrabbing()
 {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr || !grabbing_) {
     return true;
   }
@@ -183,6 +205,7 @@ bool MvsCamera::stopGrabbing()
 
 bool MvsCamera::getFrame(FrameInfo & frame, unsigned int timeout_ms)
 {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr) {
     return false;
   }
@@ -210,6 +233,7 @@ bool MvsCamera::getFrame(FrameInfo & frame, unsigned int timeout_ms)
 
 void MvsCamera::releaseFrame(FrameInfo & frame)
 {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr || frame.data == nullptr) {
     return;
   }
@@ -228,6 +252,7 @@ bool MvsCamera::convertToBgr(
   uint32_t & dst_width,
   uint32_t & dst_height)
 {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr || src.data == nullptr) {
     return false;
   }
@@ -258,6 +283,7 @@ bool MvsCamera::convertToBgr(
 
 void MvsCamera::close()
 {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr) {
     return;
   }
@@ -272,72 +298,92 @@ void MvsCamera::close()
   handle_ = nullptr;
 }
 
+// ---------- 参数设置：写完后读回，不一致则视为失败 ----------
+
 bool MvsCamera::setExposureTime(double us)
 {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr) {
     return false;
   }
 
-  int nRet = MV_CC_SetEnumValue(handle_, "ExposureAuto", 0);
-  if (nRet != MV_OK) {
+  if (MV_CC_SetEnumValue(handle_, "ExposureAuto", 0) != MV_OK) {
     return false;
   }
-
-  nRet = MV_CC_SetFloatValue(handle_, "ExposureTime", static_cast<float>(us));
-  return nRet == MV_OK;
-}
-
-bool MvsCamera::setGain(double db)
-{
-  if (handle_ == nullptr) {
-    return false;
-  }
-
-  int nRet = MV_CC_SetEnumValue(handle_, "GainAuto", 0);
-  if (nRet != MV_OK) {
-    return false;
-  }
-
-  nRet = MV_CC_SetFloatValue(handle_, "Gain", static_cast<float>(db));
-  return nRet == MV_OK;
-}
-
-bool MvsCamera::setFrameRate(double fps)
-{
-  if (handle_ == nullptr) {
-    return false;
-  }
-
-  int nRet = MV_CC_SetBoolValue(handle_, "AcquisitionFrameRateEnable", true);
-  if (nRet != MV_OK) {
-    return false;
-  }
-
-  nRet = MV_CC_SetFloatValue(handle_, "AcquisitionFrameRate", static_cast<float>(fps));
-  return nRet == MV_OK;
-}
-
-bool MvsCamera::setTriggerMode(bool enable)
-{
-  if (handle_ == nullptr) {
-    return false;
-  }
-
-  int nRet = MV_CC_SetEnumValue(handle_, "TriggerMode", enable ? 1 : 0);
-  return nRet == MV_OK;
-}
-
-bool MvsCamera::getExposureTime(double & us)
-{
-  if (handle_ == nullptr) {
+  if (MV_CC_SetFloatValue(handle_, "ExposureTime", static_cast<float>(us)) != MV_OK) {
     return false;
   }
 
   MVCC_FLOATVALUE stFloatValue;
   std::memset(&stFloatValue, 0, sizeof(MVCC_FLOATVALUE));
+  if (MV_CC_GetFloatValue(handle_, "ExposureTime", &stFloatValue) != MV_OK) {
+    return false;
+  }
+  return std::abs(stFloatValue.fCurValue - us) <= 1.0;
+}
 
-  int nRet = MV_CC_GetFloatValue(handle_, "ExposureTime", &stFloatValue);
-  if (nRet != MV_OK) {
+bool MvsCamera::setGain(double db)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (handle_ == nullptr) {
+    return false;
+  }
+
+  if (MV_CC_SetEnumValue(handle_, "GainAuto", 0) != MV_OK) {
+    return false;
+  }
+  if (MV_CC_SetFloatValue(handle_, "Gain", static_cast<float>(db)) != MV_OK) {
+    return false;
+  }
+
+  MVCC_FLOATVALUE stFloatValue;
+  std::memset(&stFloatValue, 0, sizeof(MVCC_FLOATVALUE));
+  if (MV_CC_GetFloatValue(handle_, "Gain", &stFloatValue) != MV_OK) {
+    return false;
+  }
+  return std::abs(stFloatValue.fCurValue - db) <= 0.1;
+}
+
+bool MvsCamera::setFrameRate(double fps)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (handle_ == nullptr) {
+    return false;
+  }
+
+  if (MV_CC_SetBoolValue(handle_, "AcquisitionFrameRateEnable", true) != MV_OK) {
+    return false;
+  }
+  if (MV_CC_SetFloatValue(handle_, "AcquisitionFrameRate", static_cast<float>(fps)) != MV_OK) {
+    return false;
+  }
+
+  MVCC_FLOATVALUE stFloatValue;
+  std::memset(&stFloatValue, 0, sizeof(MVCC_FLOATVALUE));
+  if (MV_CC_GetFloatValue(handle_, "AcquisitionFrameRate", &stFloatValue) != MV_OK) {
+    return false;
+  }
+  return std::abs(stFloatValue.fCurValue - fps) <= 0.1;
+}
+
+bool MvsCamera::setTriggerMode(bool enable)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (handle_ == nullptr) {
+    return false;
+  }
+  return MV_CC_SetEnumValue(handle_, "TriggerMode", enable ? 1 : 0) == MV_OK;
+}
+
+bool MvsCamera::getExposureTime(double & us)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (handle_ == nullptr) {
+    return false;
+  }
+  MVCC_FLOATVALUE stFloatValue;
+  std::memset(&stFloatValue, 0, sizeof(MVCC_FLOATVALUE));
+  if (MV_CC_GetFloatValue(handle_, "ExposureTime", &stFloatValue) != MV_OK) {
     return false;
   }
   us = stFloatValue.fCurValue;
@@ -346,15 +392,13 @@ bool MvsCamera::getExposureTime(double & us)
 
 bool MvsCamera::getGain(double & db)
 {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr) {
     return false;
   }
-
   MVCC_FLOATVALUE stFloatValue;
   std::memset(&stFloatValue, 0, sizeof(MVCC_FLOATVALUE));
-
-  int nRet = MV_CC_GetFloatValue(handle_, "Gain", &stFloatValue);
-  if (nRet != MV_OK) {
+  if (MV_CC_GetFloatValue(handle_, "Gain", &stFloatValue) != MV_OK) {
     return false;
   }
   db = stFloatValue.fCurValue;
@@ -363,15 +407,13 @@ bool MvsCamera::getGain(double & db)
 
 bool MvsCamera::getFrameRate(double & fps)
 {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr) {
     return false;
   }
-
   MVCC_FLOATVALUE stFloatValue;
   std::memset(&stFloatValue, 0, sizeof(MVCC_FLOATVALUE));
-
-  int nRet = MV_CC_GetFloatValue(handle_, "AcquisitionFrameRate", &stFloatValue);
-  if (nRet != MV_OK) {
+  if (MV_CC_GetFloatValue(handle_, "AcquisitionFrameRate", &stFloatValue) != MV_OK) {
     return false;
   }
   fps = stFloatValue.fCurValue;

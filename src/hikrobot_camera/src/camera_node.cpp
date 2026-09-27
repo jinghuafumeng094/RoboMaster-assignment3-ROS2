@@ -44,7 +44,7 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
   this->declare_parameter<std::string>("ip_address", "", desc_ip);
 
   rcl_interfaces::msg::ParameterDescriptor desc_frame;
-  desc_frame.description = "frame_id for published images (usually camera_optical_frame)";
+  desc_frame.description = "frame_id for published images";
   this->declare_parameter<std::string>("frame_id", "camera_optical_frame", desc_frame);
 
   // ---------- 读取参数 ----------
@@ -143,52 +143,11 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
 
+  // ---------- 第一遍：字符串参数（不需要回滚） ----------
   for (const auto & p : params) {
     const std::string & name = p.get_name();
 
-    if (name == "exposure_time") {
-      double v = p.as_double();
-      if (v <= 0.0) {
-        result.successful = false;
-        result.reason = "exposure_time must be > 0";
-        return result;
-      }
-      if (!mvs_camera_.setExposureTime(v)) {
-        result.successful = false;
-        result.reason = "Failed to set exposure time on camera";
-        return result;
-      }
-      RCLCPP_INFO(get_logger(), "Exposure time -> %.1f us", v);
-
-    } else if (name == "gain") {
-      double v = p.as_double();
-      if (v < 0.0) {
-        result.successful = false;
-        result.reason = "gain must be >= 0";
-        return result;
-      }
-      if (!mvs_camera_.setGain(v)) {
-        result.successful = false;
-        result.reason = "Failed to set gain on camera";
-        return result;
-      }
-      RCLCPP_INFO(get_logger(), "Gain -> %.2f dB", v);
-
-    } else if (name == "frame_rate") {
-      double v = p.as_double();
-      if (v <= 0.0) {
-        result.successful = false;
-        result.reason = "frame_rate must be > 0";
-        return result;
-      }
-      if (!mvs_camera_.setFrameRate(v)) {
-        result.successful = false;
-        result.reason = "Failed to set frame rate on camera";
-        return result;
-      }
-      RCLCPP_INFO(get_logger(), "Frame rate -> %.2f Hz", v);
-
-    } else if (name == "topic_name") {
+    if (name == "topic_name") {
       const std::string new_name = p.as_string();
       if (new_name.empty()) {
         result.successful = false;
@@ -220,6 +179,76 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
       RCLCPP_INFO(get_logger(), "frame_id -> %s", fid.c_str());
     }
   }
+
+  // ---------- 第二遍：数值参数，带回滚 ----------
+  double old_exp = 0.0, old_gain = 0.0, old_fr = 0.0;
+  mvs_camera_.getExposureTime(old_exp);
+  mvs_camera_.getGain(old_gain);
+  mvs_camera_.getFrameRate(old_fr);
+
+  bool has_exp = false, has_gain = false, has_fr = false;
+  double new_exp = old_exp, new_gain = old_gain, new_fr = old_fr;
+
+  for (const auto & p : params) {
+    const std::string & name = p.get_name();
+    if (name == "exposure_time") {
+      double v = p.as_double();
+      if (v <= 0.0) {
+        result.successful = false;
+        result.reason = "exposure_time must be > 0";
+        return result;
+      }
+      new_exp = v; has_exp = true;
+    } else if (name == "gain") {
+      double v = p.as_double();
+      if (v < 0.0) {
+        result.successful = false;
+        result.reason = "gain must be >= 0";
+        return result;
+      }
+      new_gain = v; has_gain = true;
+    } else if (name == "frame_rate") {
+      double v = p.as_double();
+      if (v <= 0.0) {
+        result.successful = false;
+        result.reason = "frame_rate must be > 0";
+        return result;
+      }
+      new_fr = v; has_fr = true;
+    }
+  }
+
+  auto rollback = [&]() {
+    if (has_exp) mvs_camera_.setExposureTime(old_exp);
+    if (has_gain) mvs_camera_.setGain(old_gain);
+    if (has_fr) mvs_camera_.setFrameRate(old_fr);
+  };
+
+  if (has_exp && !mvs_camera_.setExposureTime(new_exp)) {
+    rollback();
+    result.successful = false;
+    result.reason = "Failed to set exposure_time (readback mismatch or SDK error)";
+    RCLCPP_ERROR(get_logger(), "exposure_time update failed, rolled back");
+    return result;
+  }
+  if (has_gain && !mvs_camera_.setGain(new_gain)) {
+    rollback();
+    result.successful = false;
+    result.reason = "Failed to set gain (readback mismatch or SDK error)";
+    RCLCPP_ERROR(get_logger(), "gain update failed, rolled back");
+    return result;
+  }
+  if (has_fr && !mvs_camera_.setFrameRate(new_fr)) {
+    rollback();
+    result.successful = false;
+    result.reason = "Failed to set frame_rate (readback mismatch or SDK error)";
+    RCLCPP_ERROR(get_logger(), "frame_rate update failed, rolled back");
+    return result;
+  }
+
+  if (has_exp) RCLCPP_INFO(get_logger(), "Exposure time -> %.1f us", new_exp);
+  if (has_gain) RCLCPP_INFO(get_logger(), "Gain -> %.2f dB", new_gain);
+  if (has_fr) RCLCPP_INFO(get_logger(), "Frame rate -> %.2f Hz", new_fr);
   return result;
 }
 
@@ -239,10 +268,9 @@ void CameraNode::timerCallback()
   img->width  = frame.width;
 
   if (pixel_format_ == "bgr8") {
-    std::vector<uint8_t> bgr;
     uint32_t w = 0;
     uint32_t h = 0;
-    if (!mvs_camera_.convertToBgr(frame, bgr, w, h)) {
+    if (!mvs_camera_.convertToBgr(frame, bgr_buffer_, w, h)) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000, "Pixel convert failed");
       mvs_camera_.releaseFrame(frame);
@@ -251,7 +279,8 @@ void CameraNode::timerCallback()
     img->encoding = "bgr8";
     img->is_bigendian = 0;
     img->step = w * 3;
-    img->data = std::move(bgr);
+    // publish 时消息要独立数据，DDS 会拷贝，所以这里必须复制
+    img->data = bgr_buffer_;
   } else {
     img->encoding = "bayer_rggb8";
     img->is_bigendian = 0;
