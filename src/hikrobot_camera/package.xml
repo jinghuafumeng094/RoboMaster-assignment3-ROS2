@@ -3,7 +3,6 @@
   <name>hikrobot_camera</name>
   <version>0.1.0</version>
   <description>ROS 2 camera driver for HIKROBOT MVS SDK cameras.</description>
-  <!-- 记得改成你自己的名字和邮箱 -->
   <maintainer email="2368198695@qq.com">黄鑫睿</maintainer>
   <license>Apache-2.0</license>
 

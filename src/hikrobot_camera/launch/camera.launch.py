@@ -1,4 +1,4 @@
-"""Launch the training scaffold; this does not implement a camera driver."""
+"""Launch the hikrobot_camera node with a YAML parameter file."""
 
 from pathlib import Path
 
@@ -13,6 +13,7 @@ def generate_launch_description():
     default_params = str(
         Path(get_package_share_directory('hikrobot_camera')) / 'config' / 'camera.yaml'
     )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'params_file',

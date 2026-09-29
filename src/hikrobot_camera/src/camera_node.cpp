@@ -14,7 +14,7 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
 {
   RCLCPP_INFO(get_logger(), "hikrobot_camera node starting...");
 
-  // ---------- 声明参数 ----------
+  // 声明参数
   rcl_interfaces::msg::ParameterDescriptor desc_exp;
   desc_exp.description = "Exposure time in microseconds";
   this->declare_parameter<double>("exposure_time", 5000.0, desc_exp);
@@ -47,14 +47,14 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
   desc_frame.description = "frame_id for published images";
   this->declare_parameter<std::string>("frame_id", "camera_optical_frame", desc_frame);
 
-  // ---------- 读取参数 ----------
+  // 读取参数
   topic_name_    = this->get_parameter("topic_name").as_string();
   pixel_format_  = this->get_parameter("pixel_format").as_string();
   serial_number_ = this->get_parameter("serial_number").as_string();
   ip_address_    = this->get_parameter("ip_address").as_string();
   frame_id_      = this->get_parameter("frame_id").as_string();
 
-  // ---------- 打开相机 ----------
+  // 打开相机 
   bool opened = false;
   if (!ip_address_.empty()) {
     RCLCPP_INFO(get_logger(), "Trying to open camera by IP: %s", ip_address_.c_str());
@@ -83,7 +83,7 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
   }
   RCLCPP_INFO(get_logger(), "Camera opened");
 
-  // ---------- 应用初始参数 ----------
+  // 应用初始参数
   double exp = this->get_parameter("exposure_time").as_double();
   double g   = this->get_parameter("gain").as_double();
   double fr  = this->get_parameter("frame_rate").as_double();
@@ -106,27 +106,27 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
     RCLCPP_INFO(get_logger(), "Frame rate initialized to %.2f Hz", fr);
   }
 
-  // ---------- 取流 ----------
+  // 取流 
   if (!mvs_camera_.startGrabbing()) {
     RCLCPP_FATAL(get_logger(), "Failed to start grabbing");
     return;
   }
   RCLCPP_INFO(get_logger(), "Grabbing started");
 
-  // ---------- 发布者 ----------
+  // 发布者 
   publisher_ = this->create_publisher<sensor_msgs::msg::Image>(topic_name_, 10);
   RCLCPP_INFO(get_logger(), "Publishing to /%s, pixel_format=%s, frame_id=%s",
     topic_name_.c_str(), pixel_format_.c_str(), frame_id_.c_str());
 
-  // ---------- 定时器 ----------
+  // 定时器
   timer_ = this->create_wall_timer(
     10ms, std::bind(&CameraNode::timerCallback, this));
 
-  // ---------- 参数回调 ----------
+  // 参数回调
   param_cb_handle_ = this->add_on_set_parameters_callback(
     std::bind(&CameraNode::onParameterChange, this, std::placeholders::_1));
 
-  // ---------- 启动重连线程 ----------
+  // 启动重连线程
   reconnect_thread_ = std::thread(&CameraNode::reconnectLoop, this);
 
   initialized_ = true;
@@ -309,32 +309,49 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
     }
   }
 
-  auto rollback = [&]() {
-    if (has_exp) mvs_camera_.setExposureTime(old_exp);
-    if (has_gain) mvs_camera_.setGain(old_gain);
-    if (has_fr) mvs_camera_.setFrameRate(old_fr);
+    // ★ rollback 现在返回失败信息（空字符串表示全部回滚成功）
+  auto rollback = [&]() -> std::string {
+    std::string fails;
+    if (has_exp && !mvs_camera_.setExposureTime(old_exp)) {
+      fails += " exposure_time";
+    }
+    if (has_gain && !mvs_camera_.setGain(old_gain)) {
+      fails += " gain";
+    }
+    if (has_fr && !mvs_camera_.setFrameRate(old_fr)) {
+      fails += " frame_rate";
+    }
+    return fails;
+  };
+
+  // 通用失败处理：回滚 + 报告
+  auto handle_failure = [&](const std::string & which) {
+    std::string rb_fails = rollback();
+    result.successful = false;
+    if (rb_fails.empty()) {
+      result.reason = "Failed to set " + which + ", rolled back successfully";
+      RCLCPP_ERROR(get_logger(), "%s update failed, rolled back", which.c_str());
+    } else {
+      result.reason = "Failed to set " + which +
+        ", AND rollback FAILED for:" + rb_fails +
+        ". ROS parameters and camera hardware are now INCONSISTENT. "
+        "Please re-issue the parameter set or restart the node.";
+      RCLCPP_ERROR(get_logger(),
+        "%s update failed, rollback FAILED for:%s. "
+        "ROS parameters and hardware INCONSISTENT.",
+        which.c_str(), rb_fails.c_str());
+    }
+    return result;
   };
 
   if (has_exp && !mvs_camera_.setExposureTime(new_exp)) {
-    rollback();
-    result.successful = false;
-    result.reason = "Failed to set exposure_time (readback mismatch or SDK error)";
-    RCLCPP_ERROR(get_logger(), "exposure_time update failed, rolled back");
-    return result;
+    return handle_failure("exposure_time");
   }
   if (has_gain && !mvs_camera_.setGain(new_gain)) {
-    rollback();
-    result.successful = false;
-    result.reason = "Failed to set gain (readback mismatch or SDK error)";
-    RCLCPP_ERROR(get_logger(), "gain update failed, rolled back");
-    return result;
+    return handle_failure("gain");
   }
   if (has_fr && !mvs_camera_.setFrameRate(new_fr)) {
-    rollback();
-    result.successful = false;
-    result.reason = "Failed to set frame_rate (readback mismatch or SDK error)";
-    RCLCPP_ERROR(get_logger(), "frame_rate update failed, rolled back");
-    return result;
+    return handle_failure("frame_rate");
   }
 
   if (has_exp) RCLCPP_INFO(get_logger(), "Exposure time -> %.1f us", new_exp);

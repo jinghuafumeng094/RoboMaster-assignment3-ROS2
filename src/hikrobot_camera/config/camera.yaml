@@ -16,6 +16,6 @@
     pixel_format: "bgr8"
 
     # 相机参数
-    exposure_time: 5000.0
+    exposure_time: 20000.0
     gain: 0.0
-    frame_rate: 30.0
+    frame_rate: 45.0
