@@ -14,7 +14,7 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
 {
   RCLCPP_INFO(get_logger(), "hikrobot_camera node starting...");
 
-  // 声明参数 
+  // 声明参数
   rcl_interfaces::msg::ParameterDescriptor desc_exp;
   desc_exp.description = "Exposure time in microseconds";
   this->declare_parameter<double>("exposure_time", 5000.0, desc_exp);
@@ -114,23 +114,23 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
     RCLCPP_INFO(get_logger(), "Frame rate initialized to %.2f Hz", fr);
   }
 
-  // 取流 
+  // 取流
   if (!mvs_camera_.startGrabbing()) {
     RCLCPP_FATAL(get_logger(), "Failed to start grabbing");
     return;
   }
   RCLCPP_INFO(get_logger(), "Grabbing started");
 
-  // 发布者 
-  publisher_ = this->create_publisher<sensor_msgs::msg::Image>(topic_name_, 10);
+  // 发布者（depth 100）
+  publisher_ = this->create_publisher<sensor_msgs::msg::Image>(topic_name_, 100);
   RCLCPP_INFO(get_logger(), "Publishing to /%s, pixel_format=%s, frame_id=%s",
     topic_name_.c_str(), pixel_format_.c_str(), frame_id_.c_str());
 
-  //定时器
+  // 定时器
   timer_ = this->create_wall_timer(
     10ms, std::bind(&CameraNode::timerCallback, this));
 
-  //参数回调
+  // 参数回调
   param_cb_handle_ = this->add_on_set_parameters_callback(
     std::bind(&CameraNode::onParameterChange, this, std::placeholders::_1));
 
@@ -252,7 +252,7 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
         return result;
       }
       topic_name_ = new_name;
-      publisher_ = this->create_publisher<sensor_msgs::msg::Image>(topic_name_, 10);
+      publisher_ = this->create_publisher<sensor_msgs::msg::Image>(topic_name_, 100);
       RCLCPP_INFO(get_logger(), "Topic name -> /%s", new_name.c_str());
 
     } else if (name == "pixel_format") {
@@ -364,6 +364,7 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
   return result;
 }
 
+// timerCallback：抓帧 + 发布（已去掉诊断日志）
 void CameraNode::timerCallback()
 {
   if (reconnecting_.load()) {
