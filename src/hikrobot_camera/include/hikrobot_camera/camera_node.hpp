@@ -35,13 +35,16 @@ private:
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
 
-  std::string frame_id_     = "camera_optical_frame";
-  std::string topic_name_   = "image_raw";
-  std::string pixel_format_ = "bgr8";
+  std::string frame_id_      = "camera_optical_frame";
+  std::string topic_name_    = "image_raw";
+  std::string pixel_format_  = "bgr8";
   std::string serial_number_ = "";
   std::string ip_address_    = "";
 
-  // ---------- 断线重连 ----------
+  // 复用缓冲区：由节点持有，跨帧保留容量
+  FrameData frame_buffer_;
+
+  // 断线重连
   std::thread reconnect_thread_;
   std::atomic<bool> stop_reconnect_{false};
   std::atomic<bool> reconnect_needed_{false};

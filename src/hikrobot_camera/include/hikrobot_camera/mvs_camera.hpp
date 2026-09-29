@@ -11,20 +11,13 @@
 namespace hikrobot_camera
 {
 
-// 目标像素格式
-enum class GrabFormat
-{
-  Bgr,      
-  RawBayer  
-};
-
+// 一帧抓取结果。data 由调用方传入的 vector 承载，内部复用容量。
 struct FrameData
 {
-  std::vector<uint8_t> data;
+  std::vector<uint8_t> data;   
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t frame_num = 0;
-  uint64_t device_timestamp = 0;
   MvGvspPixelType src_pixel_type = PixelType_Gvsp_Undefined;
   std::string encoding;
 };
@@ -46,9 +39,8 @@ public:
   bool startGrabbing();
   bool stopGrabbing();
 
-  // 原子化抓帧：一次加锁完成 GetImageBuffer → 转换/拷贝 → FreeImageBuffer
-  // 返回后 out.data 是独立拷贝，SDK 缓冲区已释放，外部拿不到裸指针
-  bool grabFrame(FrameData & out, GrabFormat format, unsigned int timeout_ms);
+  // 抓帧：一次加锁，内部完成 GetImageBuffer → 拷贝到 out.data → FreeImageBuffer
+  bool grabFrame(FrameData & out, unsigned int timeout_ms);
 
   void close();
 
@@ -56,17 +48,19 @@ public:
   bool setGain(double db);
   bool setFrameRate(double fps);
   bool setTriggerMode(bool enable);
+  // 只支持 "bgr8" 和 "bayer_rggb8"，真的设置相机 PixelFormat 节点
+  bool setPixelFormat(const std::string & fmt);
 
   bool getExposureTime(double & us);
   bool getGain(double & db);
   bool getFrameRate(double & fps);
 
   bool isOpen() const;
-
   std::string lastError() const;
 
 private:
   bool openByDeviceInfo(const MV_CC_DEVICE_INFO & info);
+  static std::string pixelTypeToEncoding(MvGvspPixelType type);
 
   void * handle_ = nullptr;
   bool grabbing_ = false;
@@ -76,4 +70,4 @@ private:
 
 }  // namespace hikrobot_camera
 
-#endif  // HIKROBOT_CAMERA__MVS_CAMERA_HPP_
+#endif

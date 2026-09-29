@@ -36,6 +36,15 @@ bool MvsCamera::isOpen() const
   return handle_ != nullptr;
 }
 
+std::string MvsCamera::pixelTypeToEncoding(MvGvspPixelType type)
+{
+  switch (type) {
+    case PixelType_Gvsp_BGR8_Packed:  return "bgr8";
+    case PixelType_Gvsp_BayerRG8:     return "bayer_rggb8";
+    default:                          return "unknown";
+  }
+}
+
 bool MvsCamera::listDevices(std::vector<MV_CC_DEVICE_INFO> & devices)
 {
   devices.clear();
@@ -240,17 +249,13 @@ bool MvsCamera::stopGrabbing()
   return nRet == MV_OK;
 }
 
-bool MvsCamera::grabFrame(
-  FrameData & out,
-  GrabFormat format,
-  unsigned int timeout_ms)
+bool MvsCamera::grabFrame(FrameData & out, unsigned int timeout_ms)
 {
   std::lock_guard<std::mutex> lock(mutex_);
   if (handle_ == nullptr) {
     return false;
   }
 
-  // 1. 抓一帧（SDK 内部缓冲区）
   MV_FRAME_OUT stImageInfo;
   std::memset(&stImageInfo, 0, sizeof(MV_FRAME_OUT));
 
@@ -259,55 +264,23 @@ bool MvsCamera::grabFrame(
     return false;
   }
 
-  // 2. 填充元数据
-  out.width            = stImageInfo.stFrameInfo.nExtendWidth;
-  out.height           = stImageInfo.stFrameInfo.nExtendHeight;
-  out.frame_num        = stImageInfo.stFrameInfo.nFrameNum;
-  out.src_pixel_type   = stImageInfo.stFrameInfo.enPixelType;
-  out.device_timestamp = stImageInfo.stFrameInfo.nDevTimeStampHigh;
-  out.device_timestamp = (out.device_timestamp << 32) |
-                         stImageInfo.stFrameInfo.nDevTimeStampLow;
+  out.width          = stImageInfo.stFrameInfo.nExtendWidth;
+  out.height         = stImageInfo.stFrameInfo.nExtendHeight;
+  out.frame_num      = stImageInfo.stFrameInfo.nFrameNum;
+  out.src_pixel_type = stImageInfo.stFrameInfo.enPixelType;
 
-  // 3. 根据目标格式转换或直接拷贝
-  bool copy_ok = false;
-  if (format == GrabFormat::Bgr) {
-    size_t needed = static_cast<size_t>(out.width) * out.height * 3;
-    if (out.data.size() < needed) {
-      out.data.resize(needed);
-    }
-
-    MV_CC_PIXEL_CONVERT_PARAM stConvertParam;
-    std::memset(&stConvertParam, 0, sizeof(MV_CC_PIXEL_CONVERT_PARAM));
-    stConvertParam.nWidth         = out.width;
-    stConvertParam.nHeight        = out.height;
-    stConvertParam.pSrcData       = stImageInfo.pBufAddr;
-    stConvertParam.nSrcDataLen    = stImageInfo.stFrameInfo.nFrameLen;
-    stConvertParam.enSrcPixelType = stImageInfo.stFrameInfo.enPixelType;
-    stConvertParam.enDstPixelType = PixelType_Gvsp_BGR8_Packed;
-    stConvertParam.pDstBuffer     = out.data.data();
-    stConvertParam.nDstBufferSize = static_cast<unsigned int>(needed);
-
-    nRet = MV_CC_ConvertPixelType(handle_, &stConvertParam);
-    if (nRet == MV_OK) {
-      out.encoding = "bgr8";
-      copy_ok = true;
-    }
-  } else {
-    // RawBayer：直接拷贝原始字节（仍在锁内）
-    out.data.assign(
-      static_cast<uint8_t *>(stImageInfo.pBufAddr),
-      static_cast<uint8_t *>(stImageInfo.pBufAddr) + stImageInfo.stFrameInfo.nFrameLen);
-    out.encoding = "bayer_rggb8";
-    copy_ok = true;
+  // 复用 out.data 容量：size 和 needed 相等时不分配
+  const size_t needed = stImageInfo.stFrameInfo.nFrameLen;
+  if (out.data.size() != needed) {
+    out.data.resize(needed);
   }
+  std::memcpy(out.data.data(), stImageInfo.pBufAddr, needed);
 
-  // 4. 无论拷贝是否成功，都释放 SDK 缓冲区
-  MV_FRAME_OUT stFreeInfo;
-  std::memset(&stFreeInfo, 0, sizeof(MV_FRAME_OUT));
-  stFreeInfo.pBufAddr = stImageInfo.pBufAddr;
-  MV_CC_FreeImageBuffer(handle_, &stFreeInfo);
+  out.encoding = pixelTypeToEncoding(stImageInfo.stFrameInfo.enPixelType);
 
-  return copy_ok;
+  MV_CC_FreeImageBuffer(handle_, &stImageInfo);
+
+  return true;
 }
 
 void MvsCamera::close()
@@ -325,6 +298,106 @@ void MvsCamera::close()
   MV_CC_CloseDevice(handle_);
   MV_CC_DestroyHandle(handle_);
   handle_ = nullptr;
+}
+
+// ---------------- 参数 ----------------
+
+bool MvsCamera::setPixelFormat(const std::string & fmt)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (handle_ == nullptr) {
+    last_error_ = "Camera not open";
+    return false;
+  }
+
+  // 目标格式
+  MvGvspPixelType target;
+  if (fmt == "bgr8") {
+    target = PixelType_Gvsp_BGR8_Packed;
+  } else if (fmt == "bayer_rggb8") {
+    target = PixelType_Gvsp_BayerRG8;
+  } else {
+    last_error_ = "Unsupported pixel format: " + fmt +
+                  " (only 'bgr8' or 'bayer_rggb8')";
+    return false;
+  }
+
+  // 洞二修复：设之前先读原格式，用于失败回滚
+  MvGvspPixelType original = PixelType_Gvsp_Undefined;
+  {
+    MVCC_ENUMVALUE stCur;
+    std::memset(&stCur, 0, sizeof(MVCC_ENUMVALUE));
+    if (MV_CC_GetEnumValue(handle_, "PixelFormat", &stCur) == MV_OK) {
+      original = static_cast<MvGvspPixelType>(stCur.nCurValue);
+    }
+  }
+
+  // 取流中不能改 PixelFormat，先停
+  bool was_grabbing = grabbing_;
+  if (was_grabbing) {
+    MV_CC_StopGrabbing(handle_);
+    grabbing_ = false;
+  }
+
+  // 洞三修复：恢复取流的辅助 lambda，检查返回值
+  auto restore_grabbing = [&]() -> bool {
+    if (!was_grabbing) {
+      return true;
+    }
+    int r = MV_CC_StartGrabbing(handle_);
+    if (r == MV_OK) {
+      grabbing_ = true;
+      return true;
+    }
+    last_error_ += " (restart grabbing failed: 0x" + std::to_string(r) + ")";
+    return false;
+  };
+
+  // 回滚辅助 lambda
+  auto rollback = [&]() {
+    if (original != PixelType_Gvsp_Undefined && original != target) {
+      MV_CC_SetEnumValue(handle_, "PixelFormat", original);
+    }
+  };
+
+  // 设置新格式
+  int nRet = MV_CC_SetEnumValue(handle_, "PixelFormat", target);
+  if (nRet != MV_OK) {
+    last_error_ = "MV_CC_SetEnumValue(PixelFormat) failed: 0x" + std::to_string(nRet);
+    restore_grabbing();
+    return false;
+  }
+
+  // 洞一修复：读回失败 = 判失败
+  MVCC_ENUMVALUE stEnumValue;
+  std::memset(&stEnumValue, 0, sizeof(MVCC_ENUMVALUE));
+  nRet = MV_CC_GetEnumValue(handle_, "PixelFormat", &stEnumValue);
+
+  bool readback_ok = false;
+  if (nRet != MV_OK) {
+    last_error_ = "MV_CC_GetEnumValue(PixelFormat) failed: 0x" + std::to_string(nRet);
+  } else if (stEnumValue.nCurValue != static_cast<unsigned int>(target)) {
+    last_error_ = "PixelFormat readback mismatch: expected " +
+                  std::to_string(target) + ", got " +
+                  std::to_string(stEnumValue.nCurValue);
+  } else {
+    readback_ok = true;
+  }
+
+  if (!readback_ok) {
+    // 洞二修复：mismatch/读回失败时回滚
+    rollback();
+    restore_grabbing();
+    return false;
+  }
+
+  // 成功，恢复取流（洞三修复：检查返回值）
+  if (!restore_grabbing()) {
+    return false;
+  }
+
+  last_error_.clear();
+  return true;
 }
 
 bool MvsCamera::setExposureTime(double us)

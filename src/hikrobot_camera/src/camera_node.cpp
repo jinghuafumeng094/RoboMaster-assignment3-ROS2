@@ -14,7 +14,7 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
 {
   RCLCPP_INFO(get_logger(), "hikrobot_camera node starting...");
 
-  // 声明参数
+  // 声明参数 
   rcl_interfaces::msg::ParameterDescriptor desc_exp;
   desc_exp.description = "Exposure time in microseconds";
   this->declare_parameter<double>("exposure_time", 5000.0, desc_exp);
@@ -54,7 +54,7 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
   ip_address_    = this->get_parameter("ip_address").as_string();
   frame_id_      = this->get_parameter("frame_id").as_string();
 
-  // 打开相机 
+  // 打开相机
   bool opened = false;
   if (!ip_address_.empty()) {
     RCLCPP_INFO(get_logger(), "Trying to open camera by IP: %s", ip_address_.c_str());
@@ -82,6 +82,14 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
     }
   }
   RCLCPP_INFO(get_logger(), "Camera opened");
+
+  // 设置相机 PixelFormat
+  if (!mvs_camera_.setPixelFormat(pixel_format_)) {
+    RCLCPP_FATAL(get_logger(), "Failed to set initial pixel_format '%s': %s",
+      pixel_format_.c_str(), mvs_camera_.lastError().c_str());
+    return;
+  }
+  RCLCPP_INFO(get_logger(), "PixelFormat initialized to %s", pixel_format_.c_str());
 
   // 应用初始参数
   double exp = this->get_parameter("exposure_time").as_double();
@@ -118,11 +126,11 @@ CameraNode::CameraNode(const rclcpp::NodeOptions & options)
   RCLCPP_INFO(get_logger(), "Publishing to /%s, pixel_format=%s, frame_id=%s",
     topic_name_.c_str(), pixel_format_.c_str(), frame_id_.c_str());
 
-  // 定时器
+  //定时器
   timer_ = this->create_wall_timer(
     10ms, std::bind(&CameraNode::timerCallback, this));
 
-  // 参数回调
+  //参数回调
   param_cb_handle_ = this->add_on_set_parameters_callback(
     std::bind(&CameraNode::onParameterChange, this, std::placeholders::_1));
 
@@ -196,6 +204,13 @@ bool CameraNode::tryReconnect()
     return false;
   }
 
+  // 恢复 PixelFormat
+  if (!mvs_camera_.setPixelFormat(pixel_format_)) {
+    RCLCPP_WARN(get_logger(), "Reconnect: set pixel_format %s failed: %s",
+      pixel_format_.c_str(), mvs_camera_.lastError().c_str());
+  }
+
+  // 恢复曝光/增益/帧率
   double exp = this->get_parameter("exposure_time").as_double();
   double g   = this->get_parameter("gain").as_double();
   double fr  = this->get_parameter("frame_rate").as_double();
@@ -247,8 +262,14 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
         result.reason = "pixel_format must be 'bgr8' or 'bayer_rggb8'";
         return result;
       }
+      // 设置相机 PixelFormat
+      if (!mvs_camera_.setPixelFormat(fmt)) {
+        result.successful = false;
+        result.reason = "Failed to set pixel_format: " + mvs_camera_.lastError();
+        return result;
+      }
       pixel_format_ = fmt;
-      RCLCPP_INFO(get_logger(), "Pixel format -> %s", fmt.c_str());
+      RCLCPP_INFO(get_logger(), "Pixel format -> %s (camera PixelFormat updated)", fmt.c_str());
 
     } else if (name == "frame_id") {
       const std::string fid = p.as_string();
@@ -309,49 +330,32 @@ rcl_interfaces::msg::SetParametersResult CameraNode::onParameterChange(
     }
   }
 
-    // ★ rollback 现在返回失败信息（空字符串表示全部回滚成功）
-  auto rollback = [&]() -> std::string {
-    std::string fails;
-    if (has_exp && !mvs_camera_.setExposureTime(old_exp)) {
-      fails += " exposure_time";
-    }
-    if (has_gain && !mvs_camera_.setGain(old_gain)) {
-      fails += " gain";
-    }
-    if (has_fr && !mvs_camera_.setFrameRate(old_fr)) {
-      fails += " frame_rate";
-    }
-    return fails;
-  };
-
-  // 通用失败处理：回滚 + 报告
-  auto handle_failure = [&](const std::string & which) {
-    std::string rb_fails = rollback();
-    result.successful = false;
-    if (rb_fails.empty()) {
-      result.reason = "Failed to set " + which + ", rolled back successfully";
-      RCLCPP_ERROR(get_logger(), "%s update failed, rolled back", which.c_str());
-    } else {
-      result.reason = "Failed to set " + which +
-        ", AND rollback FAILED for:" + rb_fails +
-        ". ROS parameters and camera hardware are now INCONSISTENT. "
-        "Please re-issue the parameter set or restart the node.";
-      RCLCPP_ERROR(get_logger(),
-        "%s update failed, rollback FAILED for:%s. "
-        "ROS parameters and hardware INCONSISTENT.",
-        which.c_str(), rb_fails.c_str());
-    }
-    return result;
+  auto rollback = [&]() {
+    if (has_exp) mvs_camera_.setExposureTime(old_exp);
+    if (has_gain) mvs_camera_.setGain(old_gain);
+    if (has_fr) mvs_camera_.setFrameRate(old_fr);
   };
 
   if (has_exp && !mvs_camera_.setExposureTime(new_exp)) {
-    return handle_failure("exposure_time");
+    rollback();
+    result.successful = false;
+    result.reason = "Failed to set exposure_time (readback mismatch or SDK error)";
+    RCLCPP_ERROR(get_logger(), "exposure_time update failed, rolled back");
+    return result;
   }
   if (has_gain && !mvs_camera_.setGain(new_gain)) {
-    return handle_failure("gain");
+    rollback();
+    result.successful = false;
+    result.reason = "Failed to set gain (readback mismatch or SDK error)";
+    RCLCPP_ERROR(get_logger(), "gain update failed, rolled back");
+    return result;
   }
   if (has_fr && !mvs_camera_.setFrameRate(new_fr)) {
-    return handle_failure("frame_rate");
+    rollback();
+    result.successful = false;
+    result.reason = "Failed to set frame_rate (readback mismatch or SDK error)";
+    RCLCPP_ERROR(get_logger(), "frame_rate update failed, rolled back");
+    return result;
   }
 
   if (has_exp) RCLCPP_INFO(get_logger(), "Exposure time -> %.1f us", new_exp);
@@ -366,11 +370,8 @@ void CameraNode::timerCallback()
     return;
   }
 
-  // 一次调用完成"抓帧 + 转换 + 拷贝"，返回独立数据
-  FrameData frame;
-  GrabFormat fmt = (pixel_format_ == "bgr8") ? GrabFormat::Bgr : GrabFormat::RawBayer;
-
-  if (!mvs_camera_.grabFrame(frame, fmt, 100)) {
+  // 用成员 frame_buffer_，容量跨帧复用
+  if (!mvs_camera_.grabFrame(frame_buffer_, 100)) {
     int fails = ++consecutive_failures_;
 
     if (fails >= 10 && !reconnect_needed_.load()) {
@@ -384,18 +385,22 @@ void CameraNode::timerCallback()
   consecutive_failures_ = 0;
 
   auto img = std::make_unique<sensor_msgs::msg::Image>();
-  // 用 ROS 2 系统时间作为采集时间戳。
-  // SDK 也提供 nDevTimeStampHigh/Low（设备 tick）和 nHostTimeStamp（主机时间戳），
-  // 但单位未验证，暂不使用。
   img->header.stamp = this->now();
   img->header.frame_id = frame_id_;
-  img->height = frame.height;
-  img->width  = frame.width;
-  img->encoding = frame.encoding;
+  img->height = frame_buffer_.height;
+  img->width  = frame_buffer_.width;
+  img->encoding = frame_buffer_.encoding;
   img->is_bigendian = 0;
-  img->step = (fmt == GrabFormat::Bgr) ? (frame.width * 3) : frame.width;
 
-  img->data = std::move(frame.data);
+  // 根据 encoding 计算 step
+  if (frame_buffer_.encoding == "bgr8") {
+    img->step = frame_buffer_.width * 3;
+  } else {
+    img->step = frame_buffer_.width;   // bayer_rggb8
+  }
+
+  // 拷贝一份给消息（发布后 frame_buffer_ 保留容量供下次复用）
+  img->data = frame_buffer_.data;
 
   publisher_->publish(std::move(img));
 }
